@@ -2,7 +2,7 @@
 /*
 Plugin Name: Unclosed HTML Checker
 Description: A plugin to check for unclosed HTML tags on a given URL.
-Version: 0.1
+Version: 0.2
 Author: Lee Matthew Jackson
 */
 
@@ -40,7 +40,6 @@ function find_unclosed_tags($html) {
     libxml_clear_errors();
     
     $unclosed_tags = [];
-
     foreach ($errors as $error) {
         if (strpos($error->message, 'Opening and ending tag mismatch') !== false) {
             $unclosed_tags[] = [
@@ -49,7 +48,6 @@ function find_unclosed_tags($html) {
             ];
         }
     }
-
     return $unclosed_tags;
 }
 
@@ -57,16 +55,25 @@ function find_unclosed_tags($html) {
 function get_snippet_from_html($html, $line_number, $unclosed_tag) {
     $lines = explode("\n", $html);
     $line_number = max(0, min(count($lines) - 1, $line_number - 1));
-    if (!isset($lines[$line_number])) {
-        return '';
+    
+    $context_lines = 2; // Number of lines to show before and after
+    $start_line = max(0, $line_number - $context_lines);
+    $end_line = min(count($lines) - 1, $line_number + $context_lines);
+    
+    $snippet = array();
+    for ($i = $start_line; $i <= $end_line; $i++) {
+        $line_content = trim($lines[$i]);
+        if ($i == $line_number) {
+            $tag_position = strpos($line_content, "<$unclosed_tag");
+            if ($tag_position !== false) {
+                $line_content = substr_replace($line_content, '<strong>', $tag_position, 0);
+                $line_content .= '</strong>';
+            }
+        }
+        $snippet[] = htmlspecialchars($line_content);
     }
-    $line_content = trim($lines[$line_number]);
-    $snippet_length = 100;
-    $tag_position = strpos($line_content, "<$unclosed_tag");
-    if ($tag_position !== false) {
-        return substr($line_content, $tag_position, $snippet_length) . '...';
-    }
-    return substr($line_content, 0, $snippet_length) . '...';
+    
+    return $snippet;
 }
 
 // AJAX handler to check HTML
@@ -74,14 +81,11 @@ function html_checker_check_html() {
     if (isset($_POST['url'])) {
         $url = esc_url_raw($_POST['url']);
         $response = wp_remote_get($url);
-
         if (is_wp_error($response)) {
             echo 'Failed to fetch URL';
             wp_die();
         }
-
         $body = wp_remote_retrieve_body($response);
-
         // Check for unclosed tags
         $unclosed_tags = find_unclosed_tags($body);
         if (empty($unclosed_tags)) {
@@ -94,7 +98,11 @@ function html_checker_check_html() {
                 preg_match('/Opening and ending tag mismatch: (\w+) and (\w+)/', $unclosed_tag['message'], $matches);
                 if (isset($matches[2]) && !in_array($matches[2], $reported_tags)) {
                     $snippet = get_snippet_from_html($body, $unclosed_tag['line'], $matches[2]);
-                    echo "Issue $count: Unclosed \"&lt;{$matches[2]}&gt;\". See - $snippet<br>";
+                    echo "<strong>Issue $count:</strong> Unclosed \"&lt;{$matches[2]}&gt;\". See:<br><pre>";
+                    foreach ($snippet as $line) {
+                        echo $line . "<br>";
+                    }
+                    echo "</pre><br>"; // Add an extra line break for separation between issues
                     $reported_tags[] = $matches[2];
                     $count++;
                 }
