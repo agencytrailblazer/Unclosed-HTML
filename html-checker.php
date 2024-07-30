@@ -2,7 +2,7 @@
 /*
 Plugin Name: HTML and CSS Checker
 Description: A plugin to check for unclosed HTML tags and negative CSS margins on a given URL.
-Version: 0.3
+Version: 0.9
 Author: Lee Matthew Jackson
 */
 
@@ -94,36 +94,53 @@ function get_snippet_from_html($html, $line_number, $unclosed_tag) {
 function find_negative_margins($html, $url) {
     $negative_margins = [];
 
-    // Check inline styles
-    preg_match_all('/<[^>]+style="[^"]*margin[^"]*-[0-9]+[^"]*"/i', $html, $inline_matches);
-    foreach ($inline_matches[0] as $match) {
-        $negative_margins[] = ['type' => 'inline', 'content' => $match];
-    }
-
-    // Check internal stylesheets
+    // Check inline and internal CSS
     preg_match_all('/<style[^>]*>(.*?)<\/style>/is', $html, $style_matches);
     foreach ($style_matches[1] as $style_content) {
-        preg_match_all('/[^}]+{[^}]*margin[^}]*-[0-9]+[^}]*}/i', $style_content, $css_matches);
-        foreach ($css_matches[0] as $match) {
-            $negative_margins[] = ['type' => 'internal', 'content' => $match];
-        }
+        $negative_margins = array_merge($negative_margins, find_negative_margins_in_css($style_content));
     }
 
-    // Check external stylesheets
-    preg_match_all('/<link[^>]+rel="stylesheet"[^>]*href="([^"]+)"[^>]*>/i', $html, $link_matches);
-    foreach ($link_matches[1] as $stylesheet_url) {
-        $full_url = url_to_absolute($url, $stylesheet_url);
-        $css_content = wp_remote_get($full_url);
-        if (!is_wp_error($css_content)) {
-            $css_content = wp_remote_retrieve_body($css_content);
-            preg_match_all('/[^}]+{[^}]*margin[^}]*-[0-9]+[^}]*}/i', $css_content, $css_matches);
-            foreach ($css_matches[0] as $match) {
-                $negative_margins[] = ['type' => 'external', 'content' => $match, 'file' => $stylesheet_url];
-            }
+    // Check external CSS files
+    preg_match_all('/<link[^>]+rel=["\']stylesheet["\'][^>]*href=["\']([^"\']+)["\']/i', $html, $link_matches);
+    foreach ($link_matches[1] as $css_url) {
+        $full_css_url = url_to_absolute($url, $css_url);
+        $css_content = file_get_contents($full_css_url);
+        if ($css_content !== false) {
+            $negative_margins = array_merge($negative_margins, find_negative_margins_in_css($css_content));
         }
     }
 
     return $negative_margins;
+}
+
+function find_negative_margins_in_css($css_content) {
+    $negative_margins = [];
+    preg_match_all('/\.fl-.*?{[^}]*margin[^}]*-[0-9]+[^}]*}/is', $css_content, $css_matches);
+    foreach ($css_matches[0] as $match) {
+        if (preg_match('/\.(fl-[^\s{]+)/', $match, $class_match)) {
+            $class_name = $class_match[1];
+            if (preg_match('/margin[^;]*:[^;]*-[0-9]+[^;]*/i', $match, $margin_match)) {
+                $negative_margins[$class_name] = [
+                    'content' => $margin_match[0],
+                    'class' => $class_name
+                ];
+            }
+        }
+    }
+    return $negative_margins;
+}
+
+function get_html_for_class($html, $class_name) {
+    $dom = new DOMDocument();
+    @$dom->loadHTML($html);
+    $xpath = new DOMXPath($dom);
+    $node = $xpath->query("//*[contains(@class, '$class_name')]")->item(0);
+    
+    if ($node) {
+        return $dom->saveHTML($node);
+    }
+    
+    return null;
 }
 
 // Helper function to convert relative URLs to absolute
@@ -193,16 +210,21 @@ function negative_margin_checker_check_css() {
         // Check for negative margins
         $negative_margins = find_negative_margins($body, $url);
         if (empty($negative_margins)) {
-            echo 'No negative margins found.';
+            echo 'No EE Builder related negative margins found.';
         } else {
             $count = 1;
             foreach ($negative_margins as $margin) {
-                echo "<strong>Issue $count:</strong> Negative margin found in " . $margin['type'] . " CSS:<br><pre>";
-                echo htmlspecialchars($margin['content']);
-                if (isset($margin['file'])) {
-                    echo "<br>File: " . htmlspecialchars($margin['file']);
+                echo "<strong>Issue $count:</strong> Negative margin found in EE Builder CSS:<br>";
+                echo "<pre>" . htmlspecialchars($margin['class'] . " {\n    " . $margin['content'] . ";\n}") . "</pre>";
+                
+                $affected_html = get_html_for_class($body, $margin['class']);
+                if ($affected_html) {
+                    echo "<strong>Affected HTML:</strong><br><pre>";
+                    echo htmlspecialchars($affected_html);
+                    echo "</pre>";
                 }
-                echo "</pre><br>";
+                
+                echo "<br>";
                 $count++;
             }
         }
